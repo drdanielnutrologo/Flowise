@@ -1,5 +1,5 @@
 import { ICommonObject, IDatabaseEntity, INode, INodeData, INodeOptionsValue, INodeParams } from '../../../src/Interface'
-import { getBaseClasses } from '../../../src/utils'
+import { convertSchemaToZod, getBaseClasses } from '../../../src/utils'
 import { DynamicStructuredTool } from './core'
 import { z } from 'zod'
 import { DataSource } from 'typeorm'
@@ -36,7 +36,7 @@ class CustomTool_Tools implements INode {
 
     //@ts-ignore
     loadMethods = {
-        async listTools(nodeData: INodeData, options: ICommonObject): Promise<INodeOptionsValue[]> {
+        async listTools(_: INodeData, options: ICommonObject): Promise<INodeOptionsValue[]> {
             const returnData: INodeOptionsValue[] = []
 
             const appDataSource = options.appDataSource as DataSource
@@ -60,8 +60,9 @@ class CustomTool_Tools implements INode {
         }
     }
 
-    async init(nodeData: INodeData, input: string, options: ICommonObject): Promise<any> {
+    async init(nodeData: INodeData, _: string, options: ICommonObject): Promise<any> {
         const selectedToolId = nodeData.inputs?.selectedTool as string
+        const customToolFunc = nodeData.inputs?.customToolFunc as string
 
         const appDataSource = options.appDataSource as DataSource
         const databaseEntities = options.databaseEntities as IDatabaseEntity
@@ -78,32 +79,11 @@ class CustomTool_Tools implements INode {
                 schema: z.object(convertSchemaToZod(tool.schema)),
                 code: tool.func
             }
+            if (customToolFunc) obj.code = customToolFunc
             return new DynamicStructuredTool(obj)
         } catch (e) {
             throw new Error(e)
         }
-    }
-}
-
-const convertSchemaToZod = (schema: string) => {
-    try {
-        const parsedSchema = JSON.parse(schema)
-        const zodObj: any = {}
-        for (const sch of parsedSchema) {
-            if (sch.type === 'string') {
-                if (sch.required) z.string({ required_error: `${sch.property} required` }).describe(sch.description)
-                zodObj[sch.property] = z.string().describe(sch.description)
-            } else if (sch.type === 'number') {
-                if (sch.required) z.number({ required_error: `${sch.property} required` }).describe(sch.description)
-                zodObj[sch.property] = z.number().describe(sch.description)
-            } else if (sch.type === 'boolean') {
-                if (sch.required) z.boolean({ required_error: `${sch.property} required` }).describe(sch.description)
-                zodObj[sch.property] = z.boolean().describe(sch.description)
-            }
-        }
-        return zodObj
-    } catch (e) {
-        throw new Error(e)
     }
 }
 

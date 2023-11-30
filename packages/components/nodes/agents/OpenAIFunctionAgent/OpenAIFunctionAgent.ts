@@ -1,11 +1,10 @@
-import { ICommonObject, IMessage, INode, INodeData, INodeParams } from '../../../src/Interface'
+import { ICommonObject, INode, INodeData, INodeParams } from '../../../src/Interface'
 import { initializeAgentExecutorWithOptions, AgentExecutor } from 'langchain/agents'
-import { getBaseClasses } from '../../../src/utils'
+import { getBaseClasses, mapChatHistory } from '../../../src/utils'
 import { BaseLanguageModel } from 'langchain/base_language'
 import { flatten } from 'lodash'
-import { BaseChatMemory, ChatMessageHistory } from 'langchain/memory'
-import { AIMessage, HumanMessage } from 'langchain/schema'
-import { ConsoleCallbackHandler, CustomChainHandler } from '../../../src/handler'
+import { BaseChatMemory } from 'langchain/memory'
+import { ConsoleCallbackHandler, CustomChainHandler, additionalCallbacks } from '../../../src/handler'
 
 class OpenAIFunctionAgent_Agents implements INode {
     label: string
@@ -21,11 +20,11 @@ class OpenAIFunctionAgent_Agents implements INode {
     constructor() {
         this.label = 'OpenAI Function Agent'
         this.name = 'openAIFunctionAgent'
-        this.version = 1.0
+        this.version = 3.0
         this.type = 'AgentExecutor'
         this.category = 'Agents'
         this.icon = 'openai.png'
-        this.description = `An agent that uses OpenAI's Function Calling functionality to pick the tool and args to call`
+        this.description = `An agent that uses Function Calling to pick the tool and args to call`
         this.baseClasses = [this.type, ...getBaseClasses(AgentExecutor)]
         this.inputs = [
             {
@@ -40,10 +39,8 @@ class OpenAIFunctionAgent_Agents implements INode {
                 type: 'BaseChatMemory'
             },
             {
-                label: 'OpenAI Chat Model',
+                label: 'OpenAI/Azure Chat Model',
                 name: 'model',
-                description:
-                    'Only works with gpt-3.5-turbo-0613 and gpt-4-0613. Refer <a target="_blank" href="https://platform.openai.com/docs/guides/gpt/function-calling">docs</a> for more info',
                 type: 'BaseChatModel'
             },
             {
@@ -82,28 +79,25 @@ class OpenAIFunctionAgent_Agents implements INode {
         const memory = nodeData.inputs?.memory as BaseChatMemory
 
         if (options && options.chatHistory) {
-            const chatHistory = []
-            const histories: IMessage[] = options.chatHistory
-
-            for (const message of histories) {
-                if (message.type === 'apiMessage') {
-                    chatHistory.push(new AIMessage(message.message))
-                } else if (message.type === 'userMessage') {
-                    chatHistory.push(new HumanMessage(message.message))
-                }
+            const chatHistoryClassName = memory.chatHistory.constructor.name
+            // Only replace when its In-Memory
+            if (chatHistoryClassName && chatHistoryClassName === 'ChatMessageHistory') {
+                memory.chatHistory = mapChatHistory(options)
+                executor.memory = memory
             }
-            memory.chatHistory = new ChatMessageHistory(chatHistory)
-            executor.memory = memory
         }
 
+        ;(executor.memory as any).returnMessages = true // Return true for BaseChatModel
+
         const loggerHandler = new ConsoleCallbackHandler(options.logger)
+        const callbacks = await additionalCallbacks(nodeData, options)
 
         if (options.socketIO && options.socketIOClientId) {
             const handler = new CustomChainHandler(options.socketIO, options.socketIOClientId)
-            const result = await executor.run(input, [loggerHandler, handler])
+            const result = await executor.run(input, [loggerHandler, handler, ...callbacks])
             return result
         } else {
-            const result = await executor.run(input, [loggerHandler])
+            const result = await executor.run(input, [loggerHandler, ...callbacks])
             return result
         }
     }

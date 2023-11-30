@@ -3,9 +3,12 @@ import { load } from 'cheerio'
 import * as fs from 'fs'
 import * as path from 'path'
 import { JSDOM } from 'jsdom'
+import { z } from 'zod'
 import { DataSource } from 'typeorm'
-import { ICommonObject, IDatabaseEntity, INodeData } from './Interface'
+import { ICommonObject, IDatabaseEntity, IMessage, INodeData } from './Interface'
 import { AES, enc } from 'crypto-js'
+import { ChatMessageHistory } from 'langchain/memory'
+import { AIMessage, HumanMessage } from 'langchain/schema'
 
 export const numberOrExpressionRegex = '^(\\d+\\.?\\d*|{{.*}})$' //return true if string consists only numbers OR expression {{}}
 export const notEmptyRegex = '(.|\\s)*\\S(.|\\s)*' //return true if string is not empty or blank
@@ -130,6 +133,7 @@ export const getNodeModulesPackagePath = (packageName: string): string => {
  * @returns {boolean}
  */
 export const getInputVariables = (paramValue: string): string[] => {
+    if (typeof paramValue !== 'string') return []
     let returnVal = paramValue
     const variableStack = []
     const inputVariables = []
@@ -204,6 +208,9 @@ export const getAvailableURLs = async (url: string, limit: number) => {
 
 /**
  * Search for href through htmlBody string
+ * @param {string} htmlBody
+ * @param {string} baseURL
+ * @returns {string[]}
  */
 function getURLsFromHTML(htmlBody: string, baseURL: string): string[] {
     const dom = new JSDOM(htmlBody)
@@ -233,6 +240,8 @@ function getURLsFromHTML(htmlBody: string, baseURL: string): string[] {
 
 /**
  * Normalize URL to prevent crawling the same page
+ * @param {string} urlString
+ * @returns {string}
  */
 function normalizeURL(urlString: string): string {
     const urlObj = new URL(urlString)
@@ -246,6 +255,11 @@ function normalizeURL(urlString: string): string {
 
 /**
  * Recursive crawl using normalizeURL and getURLsFromHTML
+ * @param {string} baseURL
+ * @param {string} currentURL
+ * @param {string[]} pages
+ * @param {number} limit
+ * @returns {Promise<string[]>}
  */
 async function crawl(baseURL: string, currentURL: string, pages: string[], limit: number): Promise<string[]> {
     const baseURLObj = new URL(baseURL)
@@ -289,7 +303,10 @@ async function crawl(baseURL: string, currentURL: string, pages: string[], limit
 }
 
 /**
- * Prep URL before passing into recursive carwl function
+ * Prep URL before passing into recursive crawl function
+ * @param {string} stringURL
+ * @param {number} limit
+ * @returns {Promise<string[]>}
  */
 export async function webCrawl(stringURL: string, limit: number): Promise<string[]> {
     const URLObj = new URL(stringURL)
@@ -336,10 +353,10 @@ export async function xmlScrape(currentURL: string, limit: number): Promise<stri
     return urls
 }
 
-/*
+/**
  * Get env variables
- * @param {string} url
- * @returns {string[]}
+ * @param {string} name
+ * @returns {string | undefined}
  */
 export const getEnvironmentVariable = (name: string): string | undefined => {
     try {
@@ -381,6 +398,9 @@ const getEncryptionKeyPath = (): string => {
  * @returns {Promise<string>}
  */
 const getEncryptionKey = async (): Promise<string> => {
+    if (process.env.FLOWISE_SECRETKEY_OVERWRITE !== undefined && process.env.FLOWISE_SECRETKEY_OVERWRITE !== '') {
+        return process.env.FLOWISE_SECRETKEY_OVERWRITE
+    }
     try {
         return await fs.promises.readFile(getEncryptionKeyPath(), 'utf8')
     } catch (error) {
@@ -417,13 +437,17 @@ export const getCredentialData = async (selectedCredentialId: string, options: I
     const databaseEntities = options.databaseEntities as IDatabaseEntity
 
     try {
+        if (!selectedCredentialId) {
+            return {}
+        }
+
         const credential = await appDataSource.getRepository(databaseEntities['Credential']).findOneBy({
             id: selectedCredentialId
         })
 
         if (!credential) return {}
 
-        // Decrpyt credentialData
+        // Decrypt credentialData
         const decryptedCredentialData = await decryptCredentialData(credential.encryptedData)
 
         return decryptedCredentialData
@@ -470,6 +494,10 @@ export function handleEscapeCharacters(input: any, reverse: Boolean): any {
     return input
 }
 
+/**
+ * Get user home dir
+ * @returns {string}
+ */
 export const getUserHome = (): string => {
     let variableName = 'HOME'
     if (process.platform === 'win32') {
@@ -481,4 +509,69 @@ export const getUserHome = (): string => {
         return process.cwd()
     }
     return process.env[variableName] as string
+}
+
+/**
+ * Map incoming chat history to ChatMessageHistory
+ * @param {ICommonObject} options
+ * @returns {ChatMessageHistory}
+ */
+export const mapChatHistory = (options: ICommonObject): ChatMessageHistory => {
+    const chatHistory = []
+    const histories: IMessage[] = options.chatHistory ?? []
+
+    for (const message of histories) {
+        if (message.type === 'apiMessage') {
+            chatHistory.push(new AIMessage(message.message))
+        } else if (message.type === 'userMessage') {
+            chatHistory.push(new HumanMessage(message.message))
+        }
+    }
+    return new ChatMessageHistory(chatHistory)
+}
+
+/**
+ * Convert incoming chat history to string
+ * @param {IMessage[]} chatHistory
+ * @returns {string}
+ */
+export const convertChatHistoryToText = (chatHistory: IMessage[] = []): string => {
+    return chatHistory
+        .map((chatMessage) => {
+            if (chatMessage.type === 'apiMessage') {
+                return `Assistant: ${chatMessage.message}`
+            } else if (chatMessage.type === 'userMessage') {
+                return `Human: ${chatMessage.message}`
+            } else {
+                return `${chatMessage.message}`
+            }
+        })
+        .join('\n')
+}
+
+/**
+ * Convert schema to zod schema
+ * @param {string | object} schema
+ * @returns {ICommonObject}
+ */
+export const convertSchemaToZod = (schema: string | object): ICommonObject => {
+    try {
+        const parsedSchema = typeof schema === 'string' ? JSON.parse(schema) : schema
+        const zodObj: ICommonObject = {}
+        for (const sch of parsedSchema) {
+            if (sch.type === 'string') {
+                if (sch.required) z.string({ required_error: `${sch.property} required` }).describe(sch.description)
+                zodObj[sch.property] = z.string().describe(sch.description)
+            } else if (sch.type === 'number') {
+                if (sch.required) z.number({ required_error: `${sch.property} required` }).describe(sch.description)
+                zodObj[sch.property] = z.number().describe(sch.description)
+            } else if (sch.type === 'boolean') {
+                if (sch.required) z.boolean({ required_error: `${sch.property} required` }).describe(sch.description)
+                zodObj[sch.property] = z.boolean().describe(sch.description)
+            }
+        }
+        return zodObj
+    } catch (e) {
+        throw new Error(e)
+    }
 }
